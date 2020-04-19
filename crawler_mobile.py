@@ -13,28 +13,35 @@ import cv2
 import numpy as np
 import requests
 import pymysql
+import json
+import logging
 
-db = pymysql.connect(host='localhost', port=3306, user='root', passwd='root', db='db_sx_crawler')  # db：库名
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+LOG = logging.getLogger(__name__)
+
+db = pymysql.connect(host='localhost', port=3306, user='root', passwd='root', db='db_sx_crawler')
 cursor = db.cursor()
 
-url = ''
+url = "https://www.51highing.com/?fromuid=35483"
 
 # 1min版
-# kdl_orderid = '958717863342866'
-# kdl_API_Key = 'vl7il4z32zxi8fi3jdbhy6h20l6a4oni'
+kdl_orderid = '958717863342866'
+kdl_API_Key = 'vl7il4z32zxi8fi3jdbhy6h20l6a4oni'
 
 # Dynamic版
-kdl_orderid = '928717755392971'
-kdl_API_Key = 'e31wnwx48qhkfz8kdg4lc2qny5rpkh07'
+# kdl_orderid = '928717755392971'
+# kdl_API_Key = 'e31wnwx48qhkfz8kdg4lc2qny5rpkh07'
+
+ip_whitelist = []
 
 
 def init_model():
-    print('initializing recognizer, pls wait……')
-    id_label_map = deserialize("dat\\id_label_map.data")
+    LOG.info('initializing recognizer, pls wait……')
+    id_label_map = deserialize("dat/id_label_map.data")
     # print(id_label_map)
     model = cv2.ml.KNearest_create()
-    samples = np.loadtxt('dat\\samples.data', np.float32)
-    label_ids = np.loadtxt('dat\\label_ids.data', np.float32)
+    samples = np.loadtxt(os.path.join('dat', 'samples.data'), np.float32)
+    label_ids = np.loadtxt(os.path.join('dat', 'label_ids.data'), np.float32)
     model.train(samples, cv2.ml.ROW_SAMPLE, label_ids)
     return model, id_label_map
 
@@ -48,7 +55,7 @@ def init_browser(proxy):
     chrome_options.add_experimental_option('mobileEmulation', mobile_emulation)
     chrome_options.set_capability('pageLoadStrategy', 'eager')
     if proxy:
-        print("using proxy:  %s" % proxy)
+        LOG.info("using proxy:  %s" % proxy)
         chrome_options.add_argument("--proxy-server=http://%s" % proxy)
     driver = webdriver.Chrome(options=chrome_options)
     return driver
@@ -76,7 +83,7 @@ def ocr(image):
             res = client.basicGeneral(fp.read())
             return res['words_result'][0]['words']
         except Exception as e:
-            print("holy-shit!")
+            LOG.error("Fail to recognize!")
 
 
 def recognize(img_path):
@@ -99,11 +106,11 @@ def recognize(img_path):
 
 
 def get_validcode(browser):
-    screenshot_path = "img\\screenshot.png"
+    screenshot_path = os.path.join('img', "screenshot.png")
     browser.get_screenshot_as_file(screenshot_path)
     element = browser.find_element_by_class_name('sec_code_img')
     # 自己用PS标志基准线去量（像素模式） 从截图中抠出来验证码的区域
-    captcha_path = 'img\\captcha.png'
+    captcha_path = os.path.join('img', 'captcha.png')
     if os.path.exists(captcha_path):
         os.remove(captcha_path)
     img = Image.open(screenshot_path)
@@ -112,6 +119,23 @@ def get_validcode(browser):
     # sec_code = ocr(img)
     sec_code = recognize(captcha_path)
     return sec_code
+
+
+def detect_ip_whitelist():
+    """
+        检测当前ip地址是否变化，如变化添加到代理白名单
+    :return:
+    """
+    current_ip = requests.get('http://ip.42.pl/raw').text
+    if current_ip not in ip_whitelist:
+        ip_whitelist.append(current_ip)
+        resp = requests.get("https://dev.kdlapi.com/api/setipwhitelist",
+                            params={'orderid': kdl_orderid, 'signature': kdl_API_Key})
+        dic = json.loads(resp.text)
+        if dic['code'] == 0:
+            LOG.info('update ip whitelist success!')
+        else:
+            LOG.warning('fail to update ip whitelist!')
 
 
 def get_proxy():
@@ -123,7 +147,7 @@ def get_proxy():
 def save(username):
     try:
         cursor.execute('insert into user(username) values(%s)', username)
-        print("persist ID = ", int(cursor.lastrowid))
+        LOG.info("persist %s success, ID = %s" % (username, cursor.lastrowid))
         db.commit()
     except:
         db.rollback()
@@ -132,7 +156,7 @@ def save(username):
 if __name__ == '__main__':
     browser = None
     model, id_label_map = init_model()
-    n = 100
+    n = 100000
     i = 1
     while i <= int(n):
         try:
@@ -140,6 +164,7 @@ if __name__ == '__main__':
             proxy = get_proxy()
             browser = init_browser(proxy)
             browser.delete_all_cookies()
+            detect_ip_whitelist()
 
             browser.get(url)
             # 跳转
@@ -175,12 +200,12 @@ if __name__ == '__main__':
                 # 刷新验证码
                 browser.find_element_by_class_name('sec_code_img').click()
                 validcode = get_validcode(browser)
-            print(validcode)
+            LOG.info(validcode)
             input_validcode.send_keys(validcode)
 
             submit_btn = browser.find_element_by_tag_name('button')
             submit_btn.click()
-            print("Times = %d, %s registered success!" % (i, username))
+            LOG.info("Times = %d, %s registered success!" % (i, username))
             save(username)
             # time.sleep(5)
             # 将账号存到数据库里，便于日后登录
@@ -188,7 +213,7 @@ if __name__ == '__main__':
             i += 1
         except Exception as e:
             traceback.print_exc()
-            print("try to open the browser again……")
+            LOG.exception("try to open the browser again……")
             if browser:
                 browser.quit()
             continue
